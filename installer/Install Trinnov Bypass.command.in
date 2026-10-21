@@ -1,0 +1,119 @@
+#!/bin/bash
+# Installs "Trinnov Bypass": bypass / engage / toggle the Trinnov Nova's calibration (the Optimizer)
+# from a Stream Deck button or a keyboard shortcut. No configuration, no admin password.
+set -e
+SUPPORT="$HOME/Library/Application Support/TrinnovBypass"
+APPS="$HOME/Applications/Trinnov Bypass"
+SERVICES="$HOME/Library/Services"
+SCRIPT="$SUPPORT/trinnov_bypass.py"
+
+echo "Installing Trinnov Bypass..."
+if ! /usr/bin/python3 --version >/dev/null 2>&1; then
+  echo
+  echo "macOS needs to install its developer tools (Python) first."
+  echo "Click Install in the window that just appeared, then run this installer again."
+  exit 1
+fi
+
+mkdir -p "$SUPPORT" "$APPS" "$SERVICES"
+
+cat > "$SCRIPT" <<'PYEOF'
+@@SCRIPT@@
+PYEOF
+chmod 755 "$SCRIPT"
+
+# --- the four small apps (Stream Deck: System > Open) -------------------------------------
+make_app() {  # make_app "<name>" <command>
+  local name="$1" cmd="$2" app="$APPS/$1.app" src
+  src="$(mktemp -t trinnovapp).applescript"
+  cat > "$src" <<'ASEOF'
+try
+	set r to do shell script "/usr/bin/python3 " & quoted form of "@SCRIPT@" & " @CMD@ 2>&1"
+	display notification r with title "Trinnov"
+on error e
+	display notification e with title "Trinnov" subtitle "Failed"
+end try
+ASEOF
+  sed -i '' -e "s|@SCRIPT@|$SCRIPT|" -e "s|@CMD@|$cmd|" "$src"
+  rm -rf "$app"
+  osacompile -o "$app" "$src" 2>/dev/null
+  defaults write "$app/Contents/Info" LSUIElement -bool true   # no Dock icon flash
+  codesign --force --sign - "$app" >/dev/null 2>&1 || true
+  rm -f "$src"
+}
+make_app "Trinnov Bypass Toggle" toggle
+make_app "Trinnov Bypass On" bypass
+make_app "Trinnov Bypass Off" engage
+make_app "Trinnov Bypass Status" status
+
+# --- the four Quick Actions (assign a keyboard shortcut in System Settings) ---------------
+/usr/bin/python3 - "$SERVICES" "$SCRIPT" <<'QAEOF'
+import os, plistlib, sys, uuid
+
+services, script = sys.argv[1:3]
+actions = {"Trinnov Bypass Toggle": "toggle", "Trinnov Bypass On": "bypass",
+           "Trinnov Bypass Off": "engage", "Trinnov Bypass Status": "status"}
+
+for name, cmd in actions.items():
+    shell = (f'R=$(/usr/bin/python3 "{script}" {cmd} 2>&1)\n'
+             '/usr/bin/osascript -e \'on run argv\' -e \'display notification (item 1 of argv) '
+             'with title "Trinnov"\' -e \'end run\' "$R"\n')
+    action = {
+        "AMAccepts": {"Container": "List", "Optional": True, "Types": ["com.apple.cocoa.string"]},
+        "AMActionVersion": "2.0.3", "AMApplication": ["Automator"],
+        "AMParameterProperties": {k: {} for k in ("COMMAND_STRING", "CheckedForUserDefaultShell",
+                                                  "inputMethod", "shell", "source")},
+        "AMProvides": {"Container": "List", "Types": ["com.apple.cocoa.string"]},
+        "ActionBundlePath": "/System/Library/Automator/Run Shell Script.action",
+        "ActionName": "Run Shell Script",
+        "ActionParameters": {"COMMAND_STRING": shell, "CheckedForUserDefaultShell": True,
+                             "inputMethod": 1, "shell": "/bin/bash", "source": ""},
+        "BundleIdentifier": "com.apple.RunShellScript", "CFBundleVersion": "2.0.3",
+        "CanShowSelectedItemsWhenRun": False, "CanShowWhenRun": True,
+        "Category": ["AMCategoryUtilities"], "Class Name": "RunShellScriptAction",
+        "InputUUID": str(uuid.uuid4()).upper(), "Keywords": ["Shell", "Script"],
+        "OutputUUID": str(uuid.uuid4()).upper(), "UUID": str(uuid.uuid4()).upper(),
+        "UnlocalizedApplications": ["Automator"], "arguments": {}, "isViewVisible": True,
+        "location": "309.000000:253.000000",
+        "nibPath": "/System/Library/Automator/Run Shell Script.action/Contents/Resources/Base.lproj/main.nib",
+    }
+    wflow = {
+        "AMApplicationBuild": "523", "AMApplicationVersion": "2.10", "AMDocumentVersion": "2",
+        "actions": [{"action": action, "isViewVisible": True}], "connectors": {},
+        "workflowMetaData": {
+            "serviceInputTypeIdentifier": "com.apple.Automator.nothing",
+            "serviceOutputTypeIdentifier": "com.apple.Automator.nothing",
+            "serviceProcessesInput": 0,
+            "workflowTypeIdentifier": "com.apple.Automator.servicesMenu"},
+    }
+    info = {"NSServices": [{"NSMenuItem": {"default": name}, "NSMessage": "runWorkflowAsService"}]}
+    contents = os.path.join(services, name + ".workflow", "Contents")
+    os.makedirs(contents, exist_ok=True)
+    with open(os.path.join(contents, "document.wflow"), "wb") as f:
+        plistlib.dump(wflow, f)
+    with open(os.path.join(contents, "Info.plist"), "wb") as f:
+        plistlib.dump(info, f)
+QAEOF
+/System/Library/CoreServices/pbs -update >/dev/null 2>&1 || true
+
+# --- find the Nova now, so the first button press is instant -------------------------------
+/usr/bin/python3 "$SCRIPT" status || true
+
+cat <<'DONE'
+
+Done.
+
+STREAM DECK  Drag a "System > Open" action onto a key, click "App / File" and choose one of the
+             apps in  ~/Applications/Trinnov Bypass/ :
+               Trinnov Bypass Toggle   flip the calibration on/off
+               Trinnov Bypass On       bypass the calibration (off)
+               Trinnov Bypass Off      engage the calibration (on)
+               Trinnov Bypass Status   just report the current state
+
+KEYBOARD     System Settings > Keyboard > Keyboard Shortcuts > Services > General:
+             tick "Trinnov Bypass Toggle" (and the others if you want), click "none" next to
+             it and press the key combination you want.
+             (a Stream Deck "Hotkey" action can press that same combination.)
+
+The first time, macOS may ask to allow notifications and access to the local network: click Allow.
+DONE
